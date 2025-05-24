@@ -12,9 +12,11 @@ import {
   SkipForward, 
   Send,
   Volume2,
-  VolumeX
+  VolumeX,
+  Users
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { matchingService } from "@/services/matchingService";
 
 interface VideoChatProps {
   userEmail: string;
@@ -28,6 +30,10 @@ const VideoChat = ({ userEmail }: VideoChatProps) => {
   const [messages, setMessages] = useState<Array<{id: number, text: string, sender: 'you' | 'stranger'}>>([]);
   const [newMessage, setNewMessage] = useState("");
   const [partnerConnected, setPartnerConnected] = useState(false);
+  const [isSearching, setIsSearching] = useState(false);
+  const [currentRoomCode, setCurrentRoomCode] = useState<string | null>(null);
+  const [partnerEmail, setPartnerEmail] = useState<string | null>(null);
+  const [activeUsersCount, setActiveUsersCount] = useState(0);
   
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
@@ -55,41 +61,116 @@ const VideoChat = ({ userEmail }: VideoChatProps) => {
     };
 
     startLocalVideo();
-  }, [toast]);
+    updateActiveUsersCount();
 
-  const handleConnect = () => {
-    setIsConnected(true);
-    // Simulate finding a partner
-    setTimeout(() => {
-      setPartnerConnected(true);
-      toast({
-        title: "Connected!",
-        description: "You've been matched with another student.",
-      });
-    }, 2000);
+    // Setup realtime listeners for matching
+    const unsubscribe = matchingService.setupRealtimeListeners(handleMatchFound);
+
+    return () => {
+      unsubscribe();
+      handleDisconnect();
+    };
+  }, [userEmail]);
+
+  const updateActiveUsersCount = async () => {
+    try {
+      const count = await matchingService.getActiveUsersCount();
+      setActiveUsersCount(count);
+    } catch (error) {
+      console.error("Error getting active users count:", error);
+    }
   };
 
-  const handleDisconnect = () => {
-    setIsConnected(false);
-    setPartnerConnected(false);
-    setMessages([]);
+  const handleMatchFound = (roomCode: string, partner: string) => {
+    console.log("Match found!", roomCode, partner);
+    setCurrentRoomCode(roomCode);
+    setPartnerEmail(partner);
+    setPartnerConnected(true);
+    setIsSearching(false);
     toast({
-      title: "Disconnected",
-      description: "Looking for a new chat partner...",
+      title: "Match Found!",
+      description: `Connected with a student: ${partner.split('@')[0]}`,
     });
   };
 
-  const handleSkip = () => {
-    setPartnerConnected(false);
-    setMessages([]);
-    // Simulate finding new partner
-    setTimeout(() => {
-      setPartnerConnected(true);
+  const handleConnect = async () => {
+    setIsConnected(true);
+    setIsSearching(true);
+    
+    try {
+      await matchingService.joinQueue(userEmail);
       toast({
-        title: "New Connection",
-        description: "Connected to a new student!",
+        title: "Searching for Students",
+        description: "Looking for another student to connect with...",
       });
-    }, 1500);
+      
+      // Update count after joining
+      setTimeout(updateActiveUsersCount, 500);
+    } catch (error) {
+      console.error("Error joining queue:", error);
+      toast({
+        title: "Connection Error",
+        description: "Failed to join the matching queue. Please try again.",
+        variant: "destructive",
+      });
+      setIsConnected(false);
+      setIsSearching(false);
+    }
+  };
+
+  const handleDisconnect = async () => {
+    try {
+      if (currentRoomCode) {
+        await matchingService.endCurrentRoom();
+      } else {
+        await matchingService.leaveQueue();
+      }
+    } catch (error) {
+      console.error("Error disconnecting:", error);
+    }
+    
+    setIsConnected(false);
+    setPartnerConnected(false);
+    setIsSearching(false);
+    setCurrentRoomCode(null);
+    setPartnerEmail(null);
+    setMessages([]);
+    
+    updateActiveUsersCount();
+    
+    toast({
+      title: "Disconnected",
+      description: "You have been disconnected from the chat.",
+    });
+  };
+
+  const handleSkip = async () => {
+    try {
+      if (currentRoomCode) {
+        await matchingService.endCurrentRoom();
+      }
+      
+      setPartnerConnected(false);
+      setCurrentRoomCode(null);
+      setPartnerEmail(null);
+      setMessages([]);
+      setIsSearching(true);
+      
+      // Find new match
+      await matchingService.joinQueue(userEmail);
+      
+      toast({
+        title: "Looking for New Connection",
+        description: "Searching for another student...",
+      });
+    } catch (error) {
+      console.error("Error skipping:", error);
+      toast({
+        title: "Error",
+        description: "Failed to find new connection. Please try again.",
+        variant: "destructive",
+      });
+    }
   };
 
   const handleSendMessage = (e: React.FormEvent) => {
@@ -103,7 +184,7 @@ const VideoChat = ({ userEmail }: VideoChatProps) => {
       setMessages(prev => [...prev, message]);
       setNewMessage("");
       
-      // Simulate receiving a response
+      // Simulate receiving a response (in real implementation, this would be via WebRTC or real-time messaging)
       setTimeout(() => {
         const responses = [
           "Hey! Nice to meet you!",
@@ -111,7 +192,11 @@ const VideoChat = ({ userEmail }: VideoChatProps) => {
           "Which university are you from?",
           "That's awesome!",
           "Cool, I'm studying computer science too!",
-          "Where are you located?"
+          "Where are you located?",
+          "How are your classes going?",
+          "Do you have any favorite professors?",
+          "What year are you in?",
+          "Are you involved in any clubs?"
         ];
         const randomResponse = responses[Math.floor(Math.random() * responses.length)];
         setMessages(prev => [...prev, {
@@ -126,7 +211,27 @@ const VideoChat = ({ userEmail }: VideoChatProps) => {
   return (
     <div className="min-h-screen p-4 pt-20">
       <div className="max-w-7xl mx-auto">
-        <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 h-[calc(100vh-8rem)]">
+        {/* Status Bar */}
+        <div className="mb-4 flex justify-between items-center">
+          <div className="flex items-center space-x-4 text-white">
+            <div className="flex items-center space-x-2">
+              <Users className="w-5 h-5 text-blue-400" />
+              <span className="text-sm">{activeUsersCount} students online</span>
+            </div>
+            {currentRoomCode && (
+              <div className="text-sm text-gray-400">
+                Room: {currentRoomCode.split('_')[1]}
+              </div>
+            )}
+          </div>
+          {partnerConnected && partnerEmail && (
+            <div className="text-sm text-green-400">
+              Connected to: {partnerEmail.split('@')[0]}@{partnerEmail.split('@')[1].split('.')[0]}
+            </div>
+          )}
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 h-[calc(100vh-12rem)]">
           {/* Video Section */}
           <div className="lg:col-span-3 space-y-4">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 h-full">
@@ -141,7 +246,7 @@ const VideoChat = ({ userEmail }: VideoChatProps) => {
                     className="w-full h-full object-cover"
                   />
                   <div className="absolute bottom-4 left-4 bg-black/50 px-2 py-1 rounded text-white text-sm">
-                    You
+                    You ({userEmail.split('@')[0]})
                   </div>
                   {!isVideoOn && (
                     <div className="absolute inset-0 bg-gray-900 flex items-center justify-center">
@@ -163,20 +268,22 @@ const VideoChat = ({ userEmail }: VideoChatProps) => {
                         className="w-full h-full object-cover"
                       />
                       <div className="absolute bottom-4 left-4 bg-black/50 px-2 py-1 rounded text-white text-sm">
-                        Student Partner
+                        {partnerEmail?.split('@')[0]}
                       </div>
                     </>
                   ) : (
                     <div className="h-full flex items-center justify-center text-gray-400">
-                      {isConnected ? (
+                      {isSearching ? (
                         <div className="text-center">
                           <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-400 mx-auto mb-4"></div>
                           <p>Looking for a student to connect with...</p>
+                          <p className="text-sm mt-2">{activeUsersCount} students online</p>
                         </div>
                       ) : (
                         <div className="text-center">
                           <Video className="w-16 h-16 mx-auto mb-4" />
                           <p>Click "Start Chat" to begin</p>
+                          <p className="text-sm mt-2">{activeUsersCount} students online</p>
                         </div>
                       )}
                     </div>
