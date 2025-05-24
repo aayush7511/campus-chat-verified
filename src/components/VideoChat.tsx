@@ -1,3 +1,4 @@
+
 import { useState, useRef, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -16,6 +17,8 @@ import {
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import { matchingService } from "@/services/matchingService";
+import { webrtcService } from "@/services/webrtcService";
+import { signalingService } from "@/services/signalingService";
 
 interface VideoChatProps {
   userEmail: string;
@@ -33,16 +36,18 @@ const VideoChat = ({ userEmail }: VideoChatProps) => {
   const [currentRoomCode, setCurrentRoomCode] = useState<string | null>(null);
   const [partnerEmail, setPartnerEmail] = useState<string | null>(null);
   const [activeUsersCount, setActiveUsersCount] = useState(0);
+  const [connectionState, setConnectionState] = useState<RTCPeerConnectionState | null>(null);
   
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const { toast } = useToast();
+  const cleanupFunctionsRef = useRef<(() => void)[]>([]);
 
   useEffect(() => {
     // Start local video stream
-    const startLocalVideo = async () => {
+    const initializeMedia = async () => {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ 
+        const stream = await webrtcService.getLocalStream({ 
           video: true, 
           audio: true 
         });
@@ -59,14 +64,34 @@ const VideoChat = ({ userEmail }: VideoChatProps) => {
       }
     };
 
-    startLocalVideo();
+    initializeMedia();
     updateActiveUsersCount();
+
+    // Setup WebRTC callbacks
+    webrtcService.onRemoteStream((stream) => {
+      console.log("Received remote stream");
+      if (remoteVideoRef.current) {
+        remoteVideoRef.current.srcObject = stream;
+      }
+    });
+
+    webrtcService.onConnectionStateChange((state) => {
+      console.log("Connection state changed:", state);
+      setConnectionState(state);
+      if (state === 'connected') {
+        toast({
+          title: "Video Connected!",
+          description: "You're now connected via video call.",
+        });
+      }
+    });
 
     // Setup realtime listeners for matching
     const unsubscribe = matchingService.setupRealtimeListeners(handleMatchFound);
+    cleanupFunctionsRef.current.push(unsubscribe);
 
     return () => {
-      unsubscribe();
+      cleanupFunctionsRef.current.forEach(cleanup => cleanup());
       handleDisconnect();
     };
   }, [userEmail]);
@@ -80,12 +105,59 @@ const VideoChat = ({ userEmail }: VideoChatProps) => {
     }
   };
 
-  const handleMatchFound = (roomCode: string, partner: string) => {
+  const handleMatchFound = async (roomCode: string, partner: string) => {
     console.log("Match found!", roomCode, partner);
     setCurrentRoomCode(roomCode);
     setPartnerEmail(partner);
     setPartnerConnected(true);
     setIsSearching(false);
+    
+    // Setup signaling for WebRTC
+    try {
+      const signalingCleanup = await signalingService.setupSignaling(roomCode, userEmail);
+      cleanupFunctionsRef.current.push(signalingCleanup);
+
+      // Setup signaling message handler
+      signalingService.onMessage(async (message) => {
+        console.log("Received signaling message:", message);
+        
+        try {
+          switch (message.message_type) {
+            case 'offer':
+              const answer = await webrtcService.createAnswer(message.message_data);
+              await signalingService.sendMessage('answer', answer);
+              break;
+            case 'answer':
+              await webrtcService.setRemoteAnswer(message.message_data);
+              break;
+            case 'ice-candidate':
+              await webrtcService.addIceCandidate(message.message_data);
+              break;
+          }
+        } catch (error) {
+          console.error("Error handling signaling message:", error);
+        }
+      });
+
+      // Setup ICE candidate handling
+      webrtcService.onIceCandidate(async (candidate) => {
+        await signalingService.sendMessage('ice-candidate', candidate);
+      });
+
+      // Create offer if we're the first user
+      setTimeout(async () => {
+        try {
+          const offer = await webrtcService.createOffer();
+          await signalingService.sendMessage('offer', offer);
+        } catch (error) {
+          console.error("Error creating offer:", error);
+        }
+      }, 1000);
+
+    } catch (error) {
+      console.error("Error setting up WebRTC:", error);
+    }
+
     toast({
       title: "Match Found!",
       description: `Connected with a student: ${partner.split('@')[0]}`,
@@ -128,12 +200,24 @@ const VideoChat = ({ userEmail }: VideoChatProps) => {
       console.error("Error disconnecting:", error);
     }
     
+    // Cleanup WebRTC and signaling
+    webrtcService.cleanup();
+    signalingService.cleanup();
+    cleanupFunctionsRef.current.forEach(cleanup => cleanup());
+    cleanupFunctionsRef.current = [];
+    
     setIsConnected(false);
     setPartnerConnected(false);
     setIsSearching(false);
     setCurrentRoomCode(null);
     setPartnerEmail(null);
     setMessages([]);
+    setConnectionState(null);
+    
+    // Clear remote video
+    if (remoteVideoRef.current) {
+      remoteVideoRef.current.srcObject = null;
+    }
     
     updateActiveUsersCount();
     
@@ -149,11 +233,34 @@ const VideoChat = ({ userEmail }: VideoChatProps) => {
         await matchingService.endCurrentRoom();
       }
       
+      // Cleanup current connection
+      webrtcService.cleanup();
+      signalingService.cleanup();
+      
       setPartnerConnected(false);
       setCurrentRoomCode(null);
       setPartnerEmail(null);
       setMessages([]);
+      setConnectionState(null);
       setIsSearching(true);
+      
+      // Clear remote video
+      if (remoteVideoRef.current) {
+        remoteVideoRef.current.srcObject = null;
+      }
+      
+      // Reinitialize media
+      try {
+        const stream = await webrtcService.getLocalStream({ 
+          video: true, 
+          audio: true 
+        });
+        if (localVideoRef.current) {
+          localVideoRef.current.srcObject = stream;
+        }
+      } catch (error) {
+        console.error("Error reinitializing media:", error);
+      }
       
       // Find new match
       await matchingService.joinQueue(userEmail);
@@ -172,6 +279,18 @@ const VideoChat = ({ userEmail }: VideoChatProps) => {
     }
   };
 
+  const handleToggleVideo = () => {
+    const newVideoState = !isVideoOn;
+    setIsVideoOn(newVideoState);
+    webrtcService.toggleVideo(newVideoState);
+  };
+
+  const handleToggleAudio = () => {
+    const newAudioState = !isMicOn;
+    setIsMicOn(newAudioState);
+    webrtcService.toggleAudio(newAudioState);
+  };
+
   const handleSendMessage = (e: React.FormEvent) => {
     e.preventDefault();
     if (newMessage.trim() && partnerConnected) {
@@ -183,7 +302,7 @@ const VideoChat = ({ userEmail }: VideoChatProps) => {
       setMessages(prev => [...prev, message]);
       setNewMessage("");
       
-      // Simulate receiving a response (in real implementation, this would be via WebRTC or real-time messaging)
+      // Simulate receiving a response (in real implementation, this would be via WebRTC data channels)
       setTimeout(() => {
         const responses = [
           "Hey! Nice to meet you!",
@@ -220,6 +339,14 @@ const VideoChat = ({ userEmail }: VideoChatProps) => {
             {currentRoomCode && (
               <div className="text-sm text-gray-400">
                 Room: {currentRoomCode.split('_')[1]}
+              </div>
+            )}
+            {connectionState && (
+              <div className={`text-sm ${
+                connectionState === 'connected' ? 'text-green-400' : 
+                connectionState === 'connecting' ? 'text-yellow-400' : 'text-red-400'
+              }`}>
+                Video: {connectionState}
               </div>
             )}
           </div>
@@ -269,6 +396,14 @@ const VideoChat = ({ userEmail }: VideoChatProps) => {
                       <div className="absolute bottom-4 left-4 bg-black/50 px-2 py-1 rounded text-white text-sm">
                         {partnerEmail?.split('@')[0]}
                       </div>
+                      {connectionState !== 'connected' && (
+                        <div className="absolute inset-0 bg-black/50 flex items-center justify-center">
+                          <div className="text-center text-white">
+                            <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-400 mx-auto mb-4"></div>
+                            <p>Connecting video...</p>
+                          </div>
+                        </div>
+                      )}
                     </>
                   ) : (
                     <div className="h-full flex items-center justify-center text-gray-400">
@@ -294,7 +429,7 @@ const VideoChat = ({ userEmail }: VideoChatProps) => {
             {/* Controls */}
             <div className="flex justify-center space-x-4">
               <Button
-                onClick={() => setIsVideoOn(!isVideoOn)}
+                onClick={handleToggleVideo}
                 variant={isVideoOn ? "default" : "destructive"}
                 size="lg"
                 className="rounded-full w-12 h-12 p-0"
@@ -303,7 +438,7 @@ const VideoChat = ({ userEmail }: VideoChatProps) => {
               </Button>
               
               <Button
-                onClick={() => setIsMicOn(!isMicOn)}
+                onClick={handleToggleAudio}
                 variant={isMicOn ? "default" : "destructive"}
                 size="lg"
                 className="rounded-full w-12 h-12 p-0"
