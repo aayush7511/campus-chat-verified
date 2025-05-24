@@ -152,7 +152,7 @@ class MatchingService {
     }
   }
 
-  setupRealtimeListeners(onMatchFound: (roomCode: string, partnerEmail: string) => void): void {
+  setupRealtimeListeners(onMatchFound: (roomCode: string, partnerEmail: string) => void): () => void {
     this.onMatchFoundCallback = onMatchFound;
 
     // Listen for updates to active_users table
