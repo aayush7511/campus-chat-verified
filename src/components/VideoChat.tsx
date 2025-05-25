@@ -1,4 +1,3 @@
-
 import { useState, useRef, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -37,6 +36,7 @@ const VideoChat = ({ userEmail }: VideoChatProps) => {
   const [partnerEmail, setPartnerEmail] = useState<string | null>(null);
   const [activeUsersCount, setActiveUsersCount] = useState(0);
   const [connectionState, setConnectionState] = useState<RTCPeerConnectionState | null>(null);
+  const [isInitiator, setIsInitiator] = useState(false);
   
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
@@ -112,6 +112,11 @@ const VideoChat = ({ userEmail }: VideoChatProps) => {
     setPartnerConnected(true);
     setIsSearching(false);
     
+    // Determine who should initiate the call (first user alphabetically)
+    const shouldInitiate = userEmail < partner;
+    setIsInitiator(shouldInitiate);
+    console.log("Should initiate call:", shouldInitiate);
+    
     // Setup signaling for WebRTC
     try {
       const signalingCleanup = await signalingService.setupSignaling(roomCode, userEmail);
@@ -124,13 +129,16 @@ const VideoChat = ({ userEmail }: VideoChatProps) => {
         try {
           switch (message.message_type) {
             case 'offer':
+              console.log("Processing offer from:", message.sender_email);
               const answer = await webrtcService.createAnswer(message.message_data);
               await signalingService.sendMessage('answer', answer);
               break;
             case 'answer':
+              console.log("Processing answer from:", message.sender_email);
               await webrtcService.setRemoteAnswer(message.message_data);
               break;
             case 'ice-candidate':
+              console.log("Processing ICE candidate from:", message.sender_email);
               await webrtcService.addIceCandidate(message.message_data);
               break;
           }
@@ -141,18 +149,22 @@ const VideoChat = ({ userEmail }: VideoChatProps) => {
 
       // Setup ICE candidate handling
       webrtcService.onIceCandidate(async (candidate) => {
+        console.log("Sending ICE candidate");
         await signalingService.sendMessage('ice-candidate', candidate);
       });
 
-      // Create offer if we're the first user
-      setTimeout(async () => {
-        try {
-          const offer = await webrtcService.createOffer();
-          await signalingService.sendMessage('offer', offer);
-        } catch (error) {
-          console.error("Error creating offer:", error);
-        }
-      }, 1000);
+      // Create offer if we're the initiator
+      if (shouldInitiate) {
+        console.log("Creating offer as initiator");
+        setTimeout(async () => {
+          try {
+            const offer = await webrtcService.createOffer();
+            await signalingService.sendMessage('offer', offer);
+          } catch (error) {
+            console.error("Error creating offer:", error);
+          }
+        }, 2000); // Small delay to ensure both users are ready
+      }
 
     } catch (error) {
       console.error("Error setting up WebRTC:", error);
@@ -213,6 +225,7 @@ const VideoChat = ({ userEmail }: VideoChatProps) => {
     setPartnerEmail(null);
     setMessages([]);
     setConnectionState(null);
+    setIsInitiator(false);
     
     // Clear remote video
     if (remoteVideoRef.current) {
@@ -243,6 +256,7 @@ const VideoChat = ({ userEmail }: VideoChatProps) => {
       setMessages([]);
       setConnectionState(null);
       setIsSearching(true);
+      setIsInitiator(false);
       
       // Clear remote video
       if (remoteVideoRef.current) {
@@ -338,7 +352,7 @@ const VideoChat = ({ userEmail }: VideoChatProps) => {
             </div>
             {currentRoomCode && (
               <div className="text-sm text-gray-400">
-                Room: {currentRoomCode.split('_')[1]}
+                Room: {currentRoomCode.split('_')[1]} {isInitiator ? "(Initiator)" : "(Receiver)"}
               </div>
             )}
             {connectionState && (
@@ -401,6 +415,7 @@ const VideoChat = ({ userEmail }: VideoChatProps) => {
                           <div className="text-center text-white">
                             <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-400 mx-auto mb-4"></div>
                             <p>Connecting video...</p>
+                            <p className="text-sm mt-1">State: {connectionState}</p>
                           </div>
                         </div>
                       )}
