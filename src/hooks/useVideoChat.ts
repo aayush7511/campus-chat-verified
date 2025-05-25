@@ -1,4 +1,3 @@
-
 import { useState, useRef, useEffect } from "react";
 import { useToast } from "@/hooks/use-toast";
 import { matchingService } from "@/services/matchingService";
@@ -32,6 +31,30 @@ export const useVideoChat = (userEmail: string) => {
     }
   };
 
+  const initiateWebRTCConnection = async (shouldInitiate: boolean) => {
+    try {
+      console.log("Initiating WebRTC connection, shouldInitiate:", shouldInitiate);
+      
+      if (shouldInitiate) {
+        // Wait a bit for both sides to be ready
+        setTimeout(async () => {
+          if (signalingService.areBothReady()) {
+            console.log("Both parties ready, creating offer");
+            const offer = await webrtcService.createOffer();
+            await signalingService.sendMessage('offer', offer);
+          }
+        }, 2000);
+      }
+    } catch (error) {
+      console.error("Error initiating WebRTC connection:", error);
+      toast({
+        title: "Connection Error",
+        description: "Failed to establish video connection",
+        variant: "destructive",
+      });
+    }
+  };
+
   const handleMatchFound = async (roomCode: string, partner: string) => {
     console.log("Match found!", roomCode, partner);
     setCurrentRoomCode(roomCode);
@@ -44,28 +67,36 @@ export const useVideoChat = (userEmail: string) => {
     setIsInitiator(shouldInitiate);
     console.log("Should initiate call:", shouldInitiate);
     
-    // Setup signaling for WebRTC
     try {
-      const signalingCleanup = await signalingService.setupSignaling(roomCode, userEmail);
+      // Setup signaling for WebRTC
+      const signalingCleanup = await signalingService.setupSignaling(roomCode, userEmail, partner);
       cleanupFunctionsRef.current.push(signalingCleanup);
+
+      // Setup ready state change handler
+      signalingService.onReadyStateChange((bothReady) => {
+        console.log("Ready state changed, both ready:", bothReady);
+        if (bothReady) {
+          initiateWebRTCConnection(shouldInitiate);
+        }
+      });
 
       // Setup signaling message handler
       signalingService.onMessage(async (message) => {
-        console.log("Received signaling message:", message);
+        console.log("Received signaling message:", message.message_type);
         
         try {
           switch (message.message_type) {
             case 'offer':
-              console.log("Processing offer from:", message.sender_email);
+              console.log("Processing offer");
               const answer = await webrtcService.createAnswer(message.message_data);
               await signalingService.sendMessage('answer', answer);
               break;
             case 'answer':
-              console.log("Processing answer from:", message.sender_email);
+              console.log("Processing answer");
               await webrtcService.setRemoteAnswer(message.message_data);
               break;
             case 'ice-candidate':
-              console.log("Processing ICE candidate from:", message.sender_email);
+              console.log("Processing ICE candidate");
               await webrtcService.addIceCandidate(message.message_data);
               break;
           }
@@ -79,19 +110,6 @@ export const useVideoChat = (userEmail: string) => {
         console.log("Sending ICE candidate");
         await signalingService.sendMessage('ice-candidate', candidate);
       });
-
-      // Create offer if we're the initiator
-      if (shouldInitiate) {
-        console.log("Creating offer as initiator");
-        setTimeout(async () => {
-          try {
-            const offer = await webrtcService.createOffer();
-            await signalingService.sendMessage('offer', offer);
-          } catch (error) {
-            console.error("Error creating offer:", error);
-          }
-        }, 2000); // Small delay to ensure both users are ready
-      }
 
     } catch (error) {
       console.error("Error setting up WebRTC:", error);
@@ -191,8 +209,8 @@ export const useVideoChat = (userEmail: string) => {
       // Reinitialize media
       try {
         const stream = await webrtcService.getLocalStream({ 
-          video: true, 
-          audio: true 
+          video: isVideoOn, 
+          audio: isMicOn 
         });
         if (localVideoRef.current) {
           localVideoRef.current.srcObject = stream;
@@ -232,15 +250,16 @@ export const useVideoChat = (userEmail: string) => {
 
   const handleToggleSpeaker = () => {
     setIsSpeakerOn(!isSpeakerOn);
+    // In a real implementation, you'd control the audio output device here
   };
 
   const handleSendMessage = (message: string) => {
-    // This will be handled by the ChatSection component
-    console.log("Sending message:", message);
+    console.log("Sending message via WebRTC:", message);
+    webrtcService.sendMessage(message);
   };
 
   useEffect(() => {
-    // Start local video stream
+    // Initialize media and setup callbacks
     const initializeMedia = async () => {
       try {
         const stream = await webrtcService.getLocalStream({ 
@@ -279,6 +298,8 @@ export const useVideoChat = (userEmail: string) => {
           title: "Video Connected!",
           description: "You're now connected via video call.",
         });
+      } else if (state === 'failed' || state === 'disconnected') {
+        console.log("Connection failed or disconnected");
       }
     });
 
@@ -288,7 +309,8 @@ export const useVideoChat = (userEmail: string) => {
 
     return () => {
       cleanupFunctionsRef.current.forEach(cleanup => cleanup());
-      handleDisconnect();
+      webrtcService.cleanup();
+      signalingService.cleanup();
     };
   }, [userEmail]);
 

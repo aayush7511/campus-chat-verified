@@ -1,14 +1,16 @@
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Send } from "lucide-react";
+import { webrtcService } from "@/services/webrtcService";
 
 interface Message {
   id: number;
   text: string;
   sender: 'you' | 'stranger';
+  timestamp: Date;
 }
 
 interface ChatSectionProps {
@@ -20,53 +22,47 @@ const ChatSection = ({ partnerConnected, onSendMessage }: ChatSectionProps) => {
   const [messages, setMessages] = useState<Message[]>([]);
   const [newMessage, setNewMessage] = useState("");
 
+  useEffect(() => {
+    // Listen for incoming messages via WebRTC data channel
+    webrtcService.onDataChannelMessage((message) => {
+      const newMsg: Message = {
+        id: Date.now(),
+        text: message,
+        sender: 'stranger',
+        timestamp: new Date()
+      };
+      setMessages(prev => [...prev, newMsg]);
+    });
+  }, []);
+
   const handleSendMessage = (e: React.FormEvent) => {
     e.preventDefault();
     if (newMessage.trim() && partnerConnected) {
-      const message = {
+      const message: Message = {
         id: Date.now(),
         text: newMessage,
-        sender: 'you' as const
+        sender: 'you',
+        timestamp: new Date()
       };
       setMessages(prev => [...prev, message]);
       onSendMessage(newMessage);
       setNewMessage("");
-      
-      // Simulate receiving a response (in real implementation, this would be via WebRTC data channels)
-      setTimeout(() => {
-        const responses = [
-          "Hey! Nice to meet you!",
-          "What's your major?",
-          "Which university are you from?",
-          "That's awesome!",
-          "Cool, I'm studying computer science too!",
-          "Where are you located?",
-          "How are your classes going?",
-          "Do you have any favorite professors?",
-          "What year are you in?",
-          "Are you involved in any clubs?"
-        ];
-        const randomResponse = responses[Math.floor(Math.random() * responses.length)];
-        setMessages(prev => [...prev, {
-          id: Date.now(),
-          text: randomResponse,
-          sender: 'stranger'
-        }]);
-      }, 1000 + Math.random() * 2000);
     }
   };
 
   // Reset messages when partner disconnects
-  if (!partnerConnected && messages.length > 0) {
-    setMessages([]);
-  }
+  useEffect(() => {
+    if (!partnerConnected) {
+      setMessages([]);
+    }
+  }, [partnerConnected]);
 
   return (
     <Card className="bg-white/10 backdrop-blur-lg border-white/20 h-full flex flex-col">
       <CardContent className="p-4 flex-1 flex flex-col">
         <h3 className="text-white font-semibold mb-4">Chat</h3>
         
-        <div className="flex-1 overflow-y-auto space-y-3 mb-4">
+        <div className="flex-1 overflow-y-auto space-y-3 mb-4 min-h-0">
           {messages.length === 0 ? (
             <p className="text-gray-400 text-center text-sm">
               {partnerConnected ? "Start a conversation!" : "Connect with someone to start chatting"}
@@ -82,6 +78,9 @@ const ChatSection = ({ partnerConnected, onSendMessage }: ChatSectionProps) => {
                 }`}
               >
                 <p className="text-sm">{message.text}</p>
+                <p className="text-xs opacity-70 mt-1">
+                  {message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                </p>
               </div>
             ))
           )}
